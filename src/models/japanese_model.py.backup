@@ -1,0 +1,341 @@
+import torch
+from typing import Optional, Dict, Any, List
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizer
+)
+import logging
+from .base_model import BaseModel
+from ..utils.gpu_utils import optimize_model_for_gpu, get_gpu_memory_info
+
+logger = logging.getLogger(__name__)
+
+
+class JapaneseModel(BaseModel):
+    """Japanese Language Model for fine-tuning and inference"""
+    
+    # Supported Japanese models
+    SUPPORTED_MODELS = {
+        # Large models (30B+)
+        "cyberagent/calm3-DeepSeek-R1-Distill-Qwen-32B": {
+            "display_name": "CyberAgent DeepSeek-R1 Distill Qwen 32B Japanese",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 64,
+        },
+        "tokyotech-llm/Swallow-70b-instruct-hf": {
+            "display_name": "Swallow 70B Instruct Japanese",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 140,
+        },
+        "microsoft/WizardLM-2-8x22B": {
+            "display_name": "WizardLM-2 8x22B (Japanese capable)",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 176,
+        },
+        
+        # Medium-large models (10B-30B)
+        "tokyotech-llm/Swallow-13b-instruct-hf": {
+            "display_name": "Swallow 13B Instruct Japanese",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 26,
+        },
+        "stabilityai/japanese-stablelm-instruct-alpha-7b-v2": {
+            "display_name": "Japanese StableLM Alpha 7B v2 Instruct",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 14,
+        },
+        "rinna/youri-7b-chat": {
+            "display_name": "Rinna Youri 7B Chat",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 14,
+        },
+        "cyberagent/open-calm-7b": {
+            "display_name": "CyberAgent OpenCALM 7B",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 14,
+        },
+        
+        # Medium models (8B-10B)
+        "elyza/Llama-3-ELYZA-JP-8B": {
+            "display_name": "Llama-3 ELYZA Japanese 8B",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 16,
+        },
+        "elyza/ELYZA-japanese-Llama-2-13b-instruct": {
+            "display_name": "ELYZA Japanese Llama-2 13B Instruct",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 26,
+        },
+        
+        # Small-medium models (3B-7B)
+        "stabilityai/japanese-stablelm-3b-4e1t-instruct": {
+            "display_name": "Japanese StableLM 3B Instruct",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 8,
+        },
+        "rinna/japanese-gpt-neox-3.6b-instruction-sft": {
+            "display_name": "Rinna GPT-NeoX 3.6B Instruct",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 8,
+        },
+        "line-corporation/japanese-large-lm-3.6b-instruction-sft": {
+            "display_name": "LINE Japanese LM 3.6B Instruct",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 8,
+        },
+        "matsuo-lab/weblab-10b-instruction-sft": {
+            "display_name": "Matsuo Lab WebLab 10B Instruction",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 20,
+        },
+        
+        # Compact models (1B-3B)
+        "rinna/japanese-gpt-1b": {
+            "display_name": "Rinna GPT 1B Japanese",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 4,
+        },
+        "cyberagent/open-calm-1b": {
+            "display_name": "CyberAgent OpenCALM 1B",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 4,
+        },
+        "cyberagent/open-calm-3b": {
+            "display_name": "CyberAgent OpenCALM 3B",
+            "model_type": "causal_lm",
+            "recommended_dtype": torch.float16,
+            "min_gpu_memory_gb": 8,
+        }
+    }
+    
+    def __init__(
+        self,
+        model_name: str = "stabilityai/japanese-stablelm-3b-4e1t-instruct",
+        device: Optional[torch.device] = None,
+        load_in_8bit: bool = False,
+        load_in_4bit: bool = False,
+        torch_dtype: Optional[torch.dtype] = None,
+        use_flash_attention: bool = True,
+        gradient_checkpointing: bool = False
+    ):
+        # Check model support
+        if model_name not in self.SUPPORTED_MODELS:
+            logger.warning(f"Model {model_name} is not in the supported list. Proceeding anyway.")
+        
+        super().__init__(
+            model_name=model_name,
+            device=device,
+            load_in_8bit=load_in_8bit,
+            load_in_4bit=load_in_4bit,
+            torch_dtype=torch_dtype
+        )
+        
+        self.use_flash_attention = use_flash_attention
+        self.gradient_checkpointing = gradient_checkpointing
+        
+    def check_gpu_requirements(self) -> bool:
+        """Check if GPU requirements are met"""
+        gpu_info = get_gpu_memory_info()
+        
+        if not gpu_info["available"]:
+            logger.warning("No GPU available. Model loading may be slow or fail.")
+            return False
+        
+        if self.model_name in self.SUPPORTED_MODELS:
+            required_memory = self.SUPPORTED_MODELS[self.model_name]["min_gpu_memory_gb"]
+            
+            for device_info in gpu_info["devices"]:
+                if device_info["free_memory_gb"] >= required_memory:
+                    logger.info(
+                        f"GPU {device_info['name']} has sufficient memory "
+                        f"({device_info['free_memory_gb']:.1f}GB free, "
+                        f"{required_memory}GB required)"
+                    )
+                    return True
+            
+            logger.warning(
+                f"Insufficient GPU memory for {self.model_name}. "
+                f"Required: {required_memory}GB, "
+                f"Available: {max(d['free_memory_gb'] for d in gpu_info['devices']):.1f}GB. "
+                f"Consider using quantization (8-bit or 4-bit)."
+            )
+        
+        return True  # Allow loading anyway
+    
+    def load_model(self) -> PreTrainedModel:
+        """Load the model"""
+        logger.info(f"Loading model: {self.model_name}")
+        
+        # Check GPU requirements
+        self.check_gpu_requirements()
+        
+        # Get quantization config
+        quantization_config = self.get_quantization_config()
+        
+        # Model loading arguments
+        model_kwargs = {
+            "pretrained_model_name_or_path": self.model_name,
+            "torch_dtype": self.torch_dtype,
+            "device_map": "auto" if self.device.type == "cuda" else None,
+            "trust_remote_code": True,
+        }
+        
+        if quantization_config:
+            model_kwargs["quantization_config"] = quantization_config
+        
+        # Flash Attention setup
+        if self.use_flash_attention and self.device.type == "cuda":
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        
+        try:
+            # Load model
+            self.model = AutoModelForCausalLM.from_pretrained(**model_kwargs)
+            
+            # GPU optimization
+            if self.device.type == "cuda":
+                self.model, self.device = optimize_model_for_gpu(
+                    self.model,
+                    self.device,
+                    enable_mixed_precision=not (self.load_in_8bit or self.load_in_4bit),
+                    gradient_checkpointing=self.gradient_checkpointing
+                )
+            
+            logger.info(f"Model loaded successfully on {self.device}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            raise
+        
+        return self.model
+    
+    def load_tokenizer(self) -> PreTrainedTokenizer:
+        """Load the tokenizer"""
+        logger.info(f"Loading tokenizer for: {self.model_name}")
+        
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name,
+                trust_remote_code=True
+            )
+            
+            # Set pad token if not available
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            
+            logger.info("Tokenizer loaded successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to load tokenizer: {e}")
+            raise
+        
+        return self.tokenizer
+    
+    def format_prompt(self, instruction: str, input_text: Optional[str] = None) -> str:
+        """Format prompt for Japanese models"""
+        # Model-specific prompt formatting
+        if "stablelm" in self.model_name.lower():
+            if input_text:
+                prompt = f"<|system|>あなたは日本語でサポートするAIアシスタントです。<|endoftext|>\n<|user|>{instruction}\n入力: {input_text}<|endoftext|>\n<|assistant|>"
+            else:
+                prompt = f"<|system|>あなたは日本語でサポートするAIアシスタントです。<|endoftext|>\n<|user|>{instruction}<|endoftext|>\n<|assistant|>"
+        elif "llama" in self.model_name.lower():
+            if input_text:
+                prompt = f"### 指示:\n{instruction}\n\n### 入力:\n{input_text}\n\n### 回答:"
+            else:
+                prompt = f"### 指示:\n{instruction}\n\n### 回答:"
+        elif "rinna" in self.model_name.lower():
+            if input_text:
+                prompt = f"指示: {instruction}\n入力: {input_text}\n回答: "
+            else:
+                prompt = f"指示: {instruction}\n回答: "
+        else:
+            # Default format for other models
+            if input_text:
+                prompt = f"指示: {instruction}\n入力: {input_text}\n回答: "
+            else:
+                prompt = f"指示: {instruction}\n回答: "
+        
+        return prompt
+    
+    def generate_japanese(
+        self,
+        instruction: str,
+        input_text: Optional[str] = None,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        do_sample: bool = True,
+        **kwargs
+    ) -> str:
+        """Generate Japanese text response"""
+        prompt = self.format_prompt(instruction, input_text)
+        return self.generate(
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            do_sample=do_sample,
+            **kwargs
+        )
+    
+    def load_with_fallback(self, fallback_models: Optional[List[str]] = None) -> bool:
+        """Load model with fallback options"""
+        if fallback_models is None:
+            # Default fallback models in order of preference
+            fallback_models = [
+                "stabilityai/japanese-stablelm-3b-4e1t-instruct",
+                "rinna/japanese-gpt-neox-3.6b-instruction-sft",
+                "line-corporation/japanese-large-lm-3.6b-instruction-sft",
+                "elyza/Llama-3-ELYZA-JP-8B",
+            ]
+        
+        # Try primary model first
+        try:
+            self.load_model()
+            self.load_tokenizer()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load {self.model_name}: {e}")
+        
+        # Try fallback models
+        for fallback_model in fallback_models:
+            if fallback_model == self.model_name:
+                continue
+            
+            logger.info(f"Trying fallback model: {fallback_model}")
+            self.model_name = fallback_model
+            
+            try:
+                self.load_model()
+                self.load_tokenizer()
+                logger.info(f"Successfully loaded fallback model: {fallback_model}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to load {fallback_model}: {e}")
+        
+        logger.error("All models failed to load")
+        return False
+    
+    @classmethod
+    def list_supported_models(cls) -> Dict[str, Any]:
+        """List all supported models"""
+        return cls.SUPPORTED_MODELS
